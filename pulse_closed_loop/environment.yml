@@ -1,0 +1,14 @@
+name: pulse
+channels:
+  - default
+  - conda-forge
+dependencies:
+  - pulse
+  - gmsh
+  - ldrb
+  - jupyter
+  - jupyterlab
+  - pip:
+      - fenics-plotly
+      - jupyter-book>=0.7.0b
+      - sphinx_inline_tabs
