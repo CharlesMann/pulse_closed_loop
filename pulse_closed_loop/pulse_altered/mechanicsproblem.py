@@ -1,7 +1,7 @@
 # @Author: charlesmann
 # @Date:   2022-02-28T14:01:17+01:00
 # @Last modified by:   charlesmann
-# @Last modified time: 2022-02-28T14:27:49+01:00
+# @Last modified time: 2022-03-01T13:18:30+01:00
 
 
 
@@ -50,6 +50,11 @@ class NeumannBC:
     marker: int
     name: str = ""
 
+@dataclass
+class Lagrange_LVV:
+    lvv: typing.Union[float, ufl.Coefficient]
+    marker: int
+    name: str = ""
 
 @dataclass
 class RobinBC:
@@ -69,6 +74,7 @@ class BoundaryConditions:
     dirichlet: typing.Sequence[dirichlet_types] = ()
     robin: typing.Sequence[RobinBC] = ()
     body_force: typing.Sequence[ufl.Coefficient] = ()
+    lagrange_lv: typing.Sequence[Lagrange_LVV] = ()
 
 
 def dirichlet_fix_base(W, ffun, marker):
@@ -126,7 +132,7 @@ def cardiac_boundary_conditions(
     else:
         robin_bc = []
 
-    # Apply a linear sprint robin type BC to limit motion
+    # Apply a linear spring robin type BC to limit motion
     if base_spring > 0.0:
         robin_bc += [
             RobinBC(value=Constant(base_spring), marker=geometry.markers["BASE"][0]),
@@ -154,6 +160,7 @@ def cardiac_boundary_conditions(
         ]
     else:
         raise ValueError(f"Unknown base bc {base_bc}")
+
 
     boundary_conditions = BoundaryConditions(
         dirichlet=dirichlet_bc,
@@ -192,7 +199,6 @@ class MechanicsProblem(object):
         self.vol_ctrl = vol_ctrl
         print("Volume Control",vol_ctrl)
 
-
         self._handle_bcs(bcs=bcs, bcs_parameters=bcs_parameters)
 
         # Make sure that the material has microstructure information
@@ -205,6 +211,7 @@ class MechanicsProblem(object):
 
         self._init_spaces()
         self._init_forms()
+
 
     def _handle_bcs(self, bcs, bcs_parameters):
         if bcs is None:
@@ -220,7 +227,9 @@ class MechanicsProblem(object):
             self.bcs = cardiac_boundary_conditions(self.geometry, **self.bcs_parameters)
 
         else:
+            print("Using bcs from script")
             self.bcs = bcs
+            print(self.bcs.lagrange_lv)
 
             # TODO: FIX THIS or require this
             # Just store this as well in case both is provided
@@ -240,9 +249,16 @@ class MechanicsProblem(object):
         P2 = dolfin.VectorElement("Lagrange", mesh.ufl_cell(), 2)
         P1 = dolfin.FiniteElement("Lagrange", mesh.ufl_cell(), 1)
 
-        # P2_space = FunctionSpace(mesh, P2)
-        # P1_space = FunctionSpace(mesh, P1)
-        self.state_space = dolfin.FunctionSpace(mesh, P2 * P1)
+        # Create Real element for LVP
+        # Change this to look for lagrange_lv in bcs?
+        if self.vol_ctrl:
+            print("Creating FE for LVP")
+            R0 = dolfin.FiniteElement("Real", mesh.ufl_cell(), 0)
+            self.state_space = dolfin.FunctionSpace(mesh, dolfin.MixedElement([P2, P1, R0]))
+        else:
+            # P2_space = FunctionSpace(mesh, P2)
+            # P1_space = FunctionSpace(mesh, P1)
+            self.state_space = dolfin.FunctionSpace(mesh, P2 * P1)
 
         self.state = Function(self.state_space, name="state")
         self.state_test = dolfin.TestFunction(self.state_space)
@@ -250,9 +266,17 @@ class MechanicsProblem(object):
     def _init_forms(self):
 
         logger.debug("Initialize forms mechanics problem")
-        # Displacement and hydrostatic_pressure
-        u, p = dolfin.split(self.state)
-        v, q = dolfin.split(self.state_test)
+
+        if self.vol_ctrl:
+            u, p, pendo = dolfin.split(self.state)
+            v, q, qendo = dolfin.split(self.state_test)
+            # Grab initial cavity volume
+            cav_vol0 = self.geometry.cavity_volume(u=u)
+            self.bcs.lagrange_lv.lvv.assign(cav_vol0)
+        else:
+            # Displacement and hydrostatic_pressure
+            u, p = dolfin.split(self.state)
+            v, q = dolfin.split(self.state_test)
 
         # Some mechanical quantities
         F = dolfin.variable(kinematics.DeformationGradient(u))
@@ -268,6 +292,16 @@ class MechanicsProblem(object):
             self.state,
             self.state_test,
         )
+
+        # Kurtis trying to add in constraint for LV volume
+        if self.vol_ctrl:
+
+            # Initialize expression to hold target volume from windkessel
+            #self.LV_vol_constraint = dolfin.Expression(("vol"), vol=self.bcs.lagrange_lv.lvv, degree=2)
+            Wvol = self._vol_constraint(u, pendo, self.bcs.lagrange_lv.lvv)
+            vol_constraint = dolfin.derivative(Wvol, self.state, self.state_test)
+            self._virtual_work += vol_constraint
+
 
         external_work = self._external_work(u, v)
         if external_work is not None:
@@ -352,6 +386,26 @@ class MechanicsProblem(object):
             return list_sum(external_work)
 
         return None
+
+    def _vol_constraint(self, u, pendo, lv_vol_constraint):
+
+        mesh = self.geometry.mesh
+        ds = self.geometry.ds
+        ds_endo = ds(self.geometry.markers["ENDO"][0])
+        # ds(self.geometry.markers["ENDO"][0])
+
+        X = dolfin.SpatialCoordinate(mesh)
+        x = u + X
+
+        F = dolfin.variable(kinematics.DeformationGradient(u))
+        N = self.geometry.facet_normal
+        n = ufl.cofac(F)*N
+
+        area = dolfin.assemble(Constant(1.0) * ds_endo,form_compiler_parameters={"representation":"uflacs"})
+        V_u = - Constant(1.0/3.0) * dolfin.inner(x, n)
+        Wvol = (Constant(1.0/area) * pendo * lv_vol_constraint * ds_endo) - (pendo * V_u * ds_endo)
+
+        return Wvol
 
     def reinit(self, state, annotate=False):
         """Reinitialze state"""

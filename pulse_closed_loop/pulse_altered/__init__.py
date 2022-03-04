@@ -1,3 +1,10 @@
+# @Author: charlesmann
+# @Date:   2022-02-28T14:01:17+01:00
+# @Last modified by:   charlesmann
+# @Last modified time: 2022-03-01T11:24:28+01:00
+
+
+
 import logging as _logging
 import os
 
@@ -63,6 +70,7 @@ from .mechanicsproblem import BoundaryConditions
 from .mechanicsproblem import MechanicsProblem
 from .mechanicsproblem import NeumannBC
 from .mechanicsproblem import RobinBC
+from .mechanicsproblem import Lagrange_LVV
 from .solver import NonlinearProblem
 from .solver import NonlinearSolver
 from .unloader import FixedPointUnloader
